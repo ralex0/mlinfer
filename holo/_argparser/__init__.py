@@ -1,13 +1,13 @@
 """
-Argument parser for entry script
+Argument parser for entry scripts
 
 # TODO : Decide if should refactor to use standard library argparse instead of 
          docopts
 """
 from . import docopt as docopt
+from .. import __version__
 
-def parse(*args, **kwargs):
-    return _parse(*args, **kwargs)
-    
-def _parse(*args, **kwargs):
-    return docopt.docopt(*args, **kwargs)
+def parse(doc, cmd_args):
+    argv = ['-h'] if len(cmd_args) == 0 else cmd_args
+    pargs = docopt.docopt(doc, argv=argv, version='Holo {}'.format(__version__))
+    return pargs
