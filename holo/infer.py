@@ -14,50 +14,60 @@ from torch.distributions import constraints
 
 import numpy as np
 
-def advi_linear(model, data, steps=20000):
-    pyro.clear_param_store()
-    optimizer = Adam({'lr': 1e-3})#Adam({"lr": 0.0005, "betas": (0.90, 0.999)})
-    register_params_linear(model)
-    guide = AutoDiagonalNormal(model)
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
 
-    #chain = np.empty((len(model.param_names), steps))
-    for stp in range(steps):
-        svi.step(data)
-        #chain[:, stp] = pyro.param('auto_loc').detach().numpy()
+class ADVI:
+    """Class for doing Automatic Differentiation Variational Inference on a 
+    model. 
+    """
+    def __init__(self, mode='diagonal', optimizer=Adam({'lr': 1e-4})):
+        self.mode = mode
+        self.optimizer = optimizer
 
-    val = pyro.param('auto_loc').detach().numpy()
-    std = pyro.param('auto_scale').detach().numpy() ** .5
-    vals = [(v, s) for v, s in zip(val, std)]
-    params = {k: v for k, v in zip(model.param_names, vals)}
-    return params#, chain
+    def run(self, model, data, steps=20000):
+        self._init_run(model, steps)
+        guide = self._guide(model)
+        svi = SVI(model, guide, self.optimizer, loss=Trace_ELBO())
+        self._run(svi, data, steps)
+        return self._parse_svi_result(model)
 
-def advi_nonlinear(model, data, steps=50):
-    pyro.clear_param_store()
-    optimizer = Adam({"lr": 0.0005, "betas": (0.90, 0.999)})
-    register_params_nonlinear(model)
-    guide = AutoMultivariateNormal(model)
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO())
+    def _init_run(self, model, steps):
+        pyro.clear_param_store()
+        self._register(model.params)
+        self.chain = torch.empty(len(model.params), steps)
+        self.losses = []
 
-    for stp in range(steps):
-        svi.step(data)
-        
-    val = pyro.param('auto_loc').detach().numpy()
-    std = pyro.param('auto_scale_tril').detach().numpy()
-    vals = [(v, s) for v, s in zip(val, std)]
-    params = {k: v for k, v in zip(model.param_names, vals)}
-    return params
+    def _register(self, params):
+        loc = tensor([v[0] for v in params.values()])
+        pyro.param('auto_loc', loc)
 
+        if self.mode == 'diagonal':
+            scale = tensor([v[1] for v in params.values()])
+            pyro.param("auto_scale", scale, constraint=constraints.positive)
+        elif self.mode == 'multivariate':
+            scale = torch.diag(tensor([v[1] for v in params.values()]))
+            pyro.param("auto_scale_tril", scale, constraint=constraints.positive)
 
-def register_params_linear(model):
-    loc = tensor([v[0] for v in model.guess.values()])
-    scale = tensor([v[1]**2 for v in model.guess.values()])
-    pyro.param('auto_loc', loc)
-    pyro.param("auto_scale", scale, constraint=constraints.positive)
+    def _guide(self, model):
+        if self.mode == 'diagonal':
+            return AutoDiagonalNormal(model)
+        elif self.mode == 'multivariate':
+            return AutoMultivariateNormal(model)
 
+    def _run(self, svi, data, steps):
+        for t in range(steps):
+            self.losses.append(svi.step(data))
+            # FIXME:  ADVI crashes when I try to update chain this way  
+            # self.chain[:, t] = pyro.param('auto_loc')
 
-def register_params_nonlinear(model):
-    loc = tensor([v[0] for v in model.guess.values()])
-    scale = torch.diag(tensor([v[1] for v in model.guess.values()]))
-    pyro.param('auto_loc', loc)
-    pyro.param("auto_scale_tril", scale, constraint=constraints.positive)
+    def _parse_svi_result(self, model):
+        mean = pyro.param('auto_loc').detach().numpy()
+        if self.mode == 'diagonal':
+            var = pyro.param('auto_scale').detach().numpy()
+        elif self.mode == 'multivariate':
+            var = torch.diag(pyro.param('auto_scale_tril')).detach().numpy()
+        vals = [(v, s) for v, s in zip(mean, var)]
+        params = {k: v for k, v in zip(model.param_names, vals)}
+        if 'noise_sd' in params:
+            params['noise_sd'] = (np.exp(params['noise_sd'][0]), 
+                                  np.exp(params['noise_sd'][1]))
+        return params
