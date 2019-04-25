@@ -8,10 +8,12 @@ import pyro.distributions as dist
 
 import torch
 
-class BaseModel:
+from holopy.scattering import Sphere, calc_holo
+
+class BaseModel(object):
     """Base Model for bayesian inference
     """
-    def __init__(self, **params):
+    def __init__(self, params):
         self.params = params
         self.param_names = list(self.params.keys())
 
@@ -68,3 +70,21 @@ class NoisyNormalModel(BaseModel):
 
         return pyro.sample('likelihood', dist.Normal(expected, noise))
 
+
+class HolopyAlphaModel(NoisyNormalModel):
+    def forward(self, x, params):
+        x0 = params['x'].detach().numpy()
+        x1 = params['y'].detach().numpy()
+        x2 = params['z'].detach().numpy()
+        n = params['n'].detach().numpy()
+        r = params['r'].detach().numpy()
+        alpha = params['alpha'].detach().numpy()
+
+        sph = Sphere(center = (x0, x1, x2), n=n, r=r)
+        mod = calc_holo(x, sph, scaling=alpha).values.squeeze()
+        return torch.from_numpy(mod)
+
+    def convert_holopy(self, data):
+        x = data
+        y = torch.from_numpy(data.values.squeeze())
+        return {'x': x, 'y': y}
