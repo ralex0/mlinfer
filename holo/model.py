@@ -8,6 +8,11 @@ import pyro.distributions as dist
 
 import torch
 
+import numpy as np
+
+from scipy.ndimage.filters import gaussian_filter
+
+from holopy.core.metadata import update_metadata
 from holopy.scattering import Sphere, calc_holo
 
 class BaseModel(object):
@@ -66,25 +71,38 @@ class NoisyNormalModel(BaseModel):
             params[k] = param
         
         expected = self.forward(x, params)
-        noise = torch.exp(params['noise_sd']) ** 2
-
+        try:
+            noise = torch.exp(params['noise_sd']) ** 2
+        except KeyError:
+            try: 
+                noise = torch.tensor(x.noise_sd) ** 2
+            except:
+                noise = torch.tensor(1.)
         return pyro.sample('likelihood', dist.Normal(expected, noise))
 
 
 class HolopyAlphaModel(NoisyNormalModel):
-    def forward(self, x, params):
-        x0 = params['x'].detach().numpy()
-        x1 = params['y'].detach().numpy()
-        x2 = params['z'].detach().numpy()
-        n = params['n'].detach().numpy()
-        r = params['r'].detach().numpy()
-        alpha = params['alpha'].detach().numpy()
+    def forward(self, metadata, params):
+        x = float(params['x'])
+        y = float(params['y'])
+        z = float(params['z'])
+        n = float(params['n'])
+        r = float(params['r'])
+        alpha = float(params['alpha'])
 
-        sph = Sphere(center = (x0, x1, x2), n=n, r=r)
-        mod = calc_holo(x, sph, scaling=alpha).values.squeeze()
-        return torch.from_numpy(mod)
+        sph = Sphere(center = (x, y, z), n=n, r=r)
+        mod = calc_holo(metadata, sph, scaling=alpha).values.squeeze()
+        return torch.tensor(mod, dtype=torch.float32)
 
     def convert_holopy(self, data):
-        x = data
-        y = torch.from_numpy(data.values.squeeze())
+        x = data.copy()
+        if x.noise_sd is None:
+            x = update_metadata(x, noise_sd=self.estimate_noise_from(data))
+        y = torch.tensor(data.values.squeeze(), dtype=torch.float32)
         return {'x': x, 'y': y}
+
+    def estimate_noise_from(self, data):
+        data = data.values.squeeze()
+        smoothed_data = gaussian_filter(data, sigma=1)
+        noise = np.std(data - smoothed_data)
+        return noise
