@@ -64,7 +64,8 @@ class NoisyNormalModel(BaseModel):
         for k, v in self.params.items():
             if k == 'noise_sd':
                 ln_sigma = torch.log(torch.tensor(v[0]))
-                ln_sigma_var = torch.log(torch.tensor(v[1]))
+                # FIXME: Use estimate of variance from initial guess.
+                ln_sigma_var = torch.abs(ln_sigma) / 10
                 param = pyro.sample(k, dist.Normal(ln_sigma, ln_sigma_var))
             else:
                 param = pyro.sample(k, dist.Normal(*v))
