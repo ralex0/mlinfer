@@ -19,9 +19,10 @@ class ADVI:
     """Class for doing Automatic Differentiation Variational Inference on a 
     model. 
     """
-    def __init__(self, mode='diagonal', optimizer=Adam({'lr': 1e-4})):
+    def __init__(self, mode='diagonal', optimizer=Adam({'lr': 1e-4}), trace_chisq=True):
         self.mode = mode
         self.optimizer = optimizer
+        self.trace_chisq = trace_chisq
 
     def run(self, model, data, steps=20000):
         self._init_run(model, steps)
@@ -33,8 +34,9 @@ class ADVI:
     def _init_run(self, model, steps):
         pyro.clear_param_store()
         self._register(model.params)
-        self.chain = torch.empty(len(model.params), steps)
+        self.chain = np.empty((len(model.params), steps))
         self.losses = []
+        self.chisq = []
 
     def _register(self, params):
         loc = tensor([v[0] for v in params.values()])
@@ -56,8 +58,14 @@ class ADVI:
     def _run(self, svi, data, steps):
         for t in range(steps):
             self.losses.append(svi.step(data))
-            # FIXME:  ADVI crashes when I try to update chain this way  
-            # self.chain[:, t] = pyro.param('auto_loc')
+            if t % (steps // 10) == 0:
+                print('.', end='')
+            params = pyro.param('auto_loc').detach().numpy()
+            self.chain[:, t] = params
+            if self.trace_chisq:
+                params_dict = {k: v for k, v in zip(svi.model.param_names, params)}
+                residuals = svi.model.forward(data['x'], params_dict) - data['y']
+                self.chisq.append(float(torch.sum(residuals ** 2)))
 
     def _parse_svi_result(self, model):
         mean = pyro.param('auto_loc').detach().numpy()
@@ -70,4 +78,8 @@ class ADVI:
         if 'noise_sd' in params:
             params['noise_sd'] = (np.exp(params['noise_sd'][0]), 
                                   np.exp(params['noise_sd'][1]))
+        # FIXME: this is a hack beacause i am sampling log of r to keep it positive
+        # if 'r' in params:
+        #     params['r'] = (np.exp(params['r'][0]), 
+        #                           np.exp(params['r'][1]))
         return params
