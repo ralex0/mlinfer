@@ -6,7 +6,8 @@ Do bayesian inference on models
 import pyro
 from pyro.contrib.autoguide import AutoDiagonalNormal, AutoMultivariateNormal
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import Adam
+from pyro.infer.abstract_infer import EmpiricalMarginal
+from pyro.infer.mcmc import NUTS
 
 import torch
 from torch import tensor
@@ -18,11 +19,16 @@ import numpy as np
 class ADVI:
     """Class for doing Automatic Differentiation Variational Inference on a 
     model. 
+
+    mode : type of Gaussian guide function - 'diagonal' or 'multivariate'
+    optimizer : pyro.optim.Optimizer object
+    trace_chisq : if True, keep record of mean-squared error at every iteration
     """
-    def __init__(self, mode='diagonal', optimizer=Adam({'lr': 1e-4}), trace_chisq=True):
+    def __init__(self, mode='diagonal', optimizer=None, trace_chisq=False, quiet=False):
         self.mode = mode
         self.optimizer = optimizer
         self.trace_chisq = trace_chisq
+        self.quiet = quiet
 
     def run(self, model, data, steps=20000):
         self._init_run(model, steps)
@@ -58,7 +64,7 @@ class ADVI:
     def _run(self, svi, data, steps):
         for t in range(steps):
             self.losses.append(svi.step(data))
-            if t % (steps // 10) == 0:
+            if (t % max(int(steps / 10), 1) == 0) and (not self.quiet):
                 print('.', end='')
             params = pyro.param('auto_loc').detach().numpy()
             self.chain[:, t] = params
@@ -78,8 +84,54 @@ class ADVI:
         if 'noise_sd' in params:
             params['noise_sd'] = (np.exp(params['noise_sd'][0]), 
                                   np.exp(params['noise_sd'][1]))
-        # FIXME: this is a hack beacause i am sampling log of r to keep it positive
-        # if 'r' in params:
-        #     params['r'] = (np.exp(params['r'][0]), 
-        #                           np.exp(params['r'][1]))
         return params
+
+class MCMC:
+    """Class for doing Markov Chain Monte Carlo Inference on a model. 
+    """
+    def __init__(self, mode='NUTS', step_size='adapt', adapt_step_size=False):
+        self.mode = mode
+        self.step_size = step_size
+        self.adapt_step_size = adapt_step_size
+
+    def run(self, model, data, steps, burn=0, chains=1):
+        kernel = self._setup_kernel(model)
+        self._init_mcmc(model, kernel, data)
+        sampler = pyro.infer.mcmc.MCMC(kernel, num_samples=steps, warmup_steps=burn, num_chains=chains)
+        self.result = sampler.run(data)
+        self._finalize_chain(model)
+        return self._summarize_mcmc_result()
+
+    def _setup_kernel(self, model):
+        if self.mode == 'NUTS':
+            if self.step_size == 'adapt':
+                return NUTS(model, adapt_step_size=True)
+            else:
+                return NUTS(model, step_size=self.step_size, 
+                            adapt_step_size=self.adapt_step_size)
+
+    def _init_mcmc(self, model, kernel, data):
+        initial_trace = pyro.poutine.trace(model).get_trace(data)
+        for param in model.param_names:
+            initial_trace.nodes[param]['value'] = tensor(model.params[param][0],
+                                                         dtype=torch.float32)
+        kernel.initial_trace = initial_trace
+
+    def _finalize_chain(self, model):
+        # Why is this method of the marginal private?
+        chain_torch = EmpiricalMarginal(self.result, model.param_names)._samples
+        self.chain_numpy = _numpy_from(chain_torch)
+        self.chain = {k: v for k, v in zip(model.param_names, self.chain_numpy.T)}
+
+    def _summarize_mcmc_result(self):
+        loc = [v.mean() for v in self.chain.values()]
+        scale = [v.var() for v in self.chain.values()]
+        vals = [(l, s) for l, s in zip(loc, scale)]
+        params = {k: v for k, v in zip(self.chain.keys(), vals)}
+        if 'noise_sd' in params:
+            params['noise_sd'] = (np.exp(params['noise_sd'][0]), 
+                                  np.exp(params['noise_sd'][1]))
+        return params
+
+def _numpy_from(tensor):
+    return tensor.cpu().detach().numpy()
