@@ -88,7 +88,11 @@ class HolopyAlphaModel(NoisyNormalModel):
         y = float(params['y'])
         z = float(params['z'])
         n = float(params['n'])
-        r = float(params['r'])
+        # FIXME: Enforce constraints with pryo API
+        min_r = 1e-12
+        k = 2 * np.pi * metadata.medium_index / metadata.illum_wavelen
+        max_r = 9.99e2 / k
+        r = float(min(max(params['r'], min_r), max_r))
         alpha = float(params['alpha'])
 
         sph = Sphere(center = (x, y, z), n=n, r=r)
